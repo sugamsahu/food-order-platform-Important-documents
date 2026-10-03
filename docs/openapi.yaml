@@ -1,0 +1,856 @@
+openapi: 3.0.3
+info:
+  title: Food Order Platform API
+  version: 1.0.0
+  description: |
+    REST API for a single-restaurant food ordering platform: a staff/admin API used by the React
+    admin UI, and a mobile API used by customers.
+
+    **Conventions**
+    - Base path `/api/v1`. JSON requests and responses, `snake_case` field names.
+    - Ids are integers. Money is a decimal **string** with two decimals (`"48.00"`), never a float.
+    - Timestamps are ISO 8601 UTC.
+    - Every list is paginated: `?page=1&page_size=20` (max `page_size` 100) and returns
+      `{ "data": [...], "pagination": { page, page_size, total, total_pages } }`.
+    - Every error has the same shape: `{ "error": { "code", "message", "details" } }`. Validation
+      errors use `VALIDATION_ERROR` with `details.fields` mapping field names to messages.
+    - Staff and customer tokens are different: a customer token is rejected on staff routes and the reverse.
+servers:
+  - url: http://localhost:8080/api/v1
+tags:
+  - name: Auth
+  - name: Staff users
+    description: Administrator only.
+  - name: Foods
+  - name: Orders
+  - name: Mobile
+    description: Customer token required (except login).
+paths:
+  /auth/staff/login:
+    post:
+      tags: [Auth]
+      summary: Staff sign-in
+      description: Failed attempts are rate limited per IP (default 5 per 15 minutes, then 429).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+            example: { email: admin@example.com, password: password123 }
+      responses:
+        '200':
+          description: Signed in
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  token_type: { type: string, example: Bearer }
+                  expires_in: { type: string, example: 2d }
+                  user: { $ref: '#/components/schemas/StaffUser' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/InvalidCredentials' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Current staff user
+      security: [{ staffAuth: [] }]
+      responses:
+        '200':
+          description: The signed-in user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: '#/components/schemas/StaffUser' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Sign out everywhere
+      description: Invalidates every token previously issued to this user.
+      security: [{ staffAuth: [] }]
+      responses:
+        '204': { description: Signed out }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /staff-users:
+    get:
+      tags: [Staff users]
+      summary: List staff users
+      security: [{ staffAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { name: q, in: query, description: Matches name or email, schema: { type: string } }
+        - { name: role, in: query, schema: { type: string, enum: [admin, operator] } }
+        - { name: is_active, in: query, schema: { type: boolean } }
+      responses:
+        '200':
+          description: A page of staff users
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Page' }
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: '#/components/schemas/StaffUser' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Staff users]
+      summary: Create a staff user
+      security: [{ staffAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StaffCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffUser' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /staff-users/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+    get:
+      tags: [Staff users]
+      summary: Get a staff user
+      security: [{ staffAuth: [] }]
+      responses:
+        '200':
+          description: The staff user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffUser' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Staff users]
+      summary: Update name, email or role
+      description: The last active administrator cannot be demoted (`LAST_ADMIN`, 409).
+      security: [{ staffAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StaffUpdate' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffUser' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /staff-users/{id}/deactivate:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+    patch:
+      tags: [Staff users]
+      summary: Deactivate a staff user
+      description: Takes effect immediately (existing tokens stop working). You cannot deactivate yourself, nor the last active administrator.
+      security: [{ staffAuth: [] }]
+      responses:
+        '200':
+          description: Deactivated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffUser' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /staff-users/{id}/activate:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+    patch:
+      tags: [Staff users]
+      summary: Reactivate a staff user
+      security: [{ staffAuth: [] }]
+      responses:
+        '200':
+          description: Reactivated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffUser' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /staff-users/{id}/reset-password:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+    post:
+      tags: [Staff users]
+      summary: Reset a staff user's password
+      description: Ends all of that user's sessions.
+      security: [{ staffAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string, minLength: 8, maxLength: 72 }
+      responses:
+        '204': { description: Password changed }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /foods:
+    get:
+      tags: [Foods]
+      summary: List foods (administrator and operator)
+      security: [{ staffAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { name: q, in: query, description: Matches name or description, schema: { type: string } }
+        - { name: availability, in: query, schema: { type: string, enum: [all, available, unavailable], default: all } }
+        - { name: category, in: query, schema: { type: string } }
+        - { name: include_archived, in: query, schema: { type: boolean, default: false } }
+      responses:
+        '200':
+          description: A page of foods
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Page' }
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: '#/components/schemas/Food' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Foods]
+      summary: Create a food (administrator and operator)
+      security: [{ staffAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FoodCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Food' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /foods/categories:
+    get:
+      tags: [Foods]
+      summary: Distinct categories of non-archived foods
+      security: [{ staffAuth: [] }]
+      responses:
+        '200':
+          description: Category names
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { type: string } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /foods/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+    get:
+      tags: [Foods]
+      summary: Get a food
+      security: [{ staffAuth: [] }]
+      responses:
+        '200':
+          description: The food
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Food' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Foods]
+      summary: Update a food
+      description: Archived foods cannot be edited (`FOOD_ARCHIVED`, 409); restore first.
+      security: [{ staffAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FoodUpdate' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Food' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /foods/{id}/availability:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+    patch:
+      tags: [Foods]
+      summary: Mark a food available or unavailable
+      security: [{ staffAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [is_available]
+              properties:
+                is_available: { type: boolean }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Food' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /foods/{id}/archive:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+    patch:
+      tags: [Foods]
+      summary: Archive a food (administrator only)
+      description: Soft delete. The food disappears from menus and cannot be ordered; existing orders keep their lines.
+      security: [{ staffAuth: [] }]
+      responses:
+        '200':
+          description: Archived
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Food' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /foods/{id}/restore:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+    patch:
+      tags: [Foods]
+      summary: Restore an archived food (administrator only)
+      security: [{ staffAuth: [] }]
+      responses:
+        '200':
+          description: Restored (still marked unavailable until switched on)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Food' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /orders:
+    get:
+      tags: [Orders]
+      summary: List orders, newest first
+      security: [{ staffAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { name: q, in: query, description: 'Matches order reference, customer name or customer email', schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/OrderStatus' } }
+        - { name: fulfillment_type, in: query, schema: { $ref: '#/components/schemas/FulfillmentType' } }
+      responses:
+        '200':
+          description: A page of orders
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Page' }
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: '#/components/schemas/OrderSummary' } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /orders/metrics:
+    get:
+      tags: [Orders]
+      summary: Order counts by status
+      security: [{ staffAuth: [] }]
+      responses:
+        '200':
+          description: Counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  counts:
+                    type: object
+                    additionalProperties: { type: integer }
+                    example: { Placed: 1, Accepted: 1, Preparing: 1, Ready: 1, Completed: 1, Cancelled: 1 }
+                  total: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /orders/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+    get:
+      tags: [Orders]
+      summary: Order detail with items, customer and status timeline
+      security: [{ staffAuth: [] }]
+      responses:
+        '200':
+          description: The order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Orders]
+      summary: Edit notes and fulfillment details
+      description: |
+        Items, quantities and prices cannot be edited. Fulfillment type and delivery address can be
+        changed until the order is Ready (`ORDER_LOCKED`, 409 afterwards). Notes can always be edited.
+      security: [{ staffAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                notes: { type: string, nullable: true, maxLength: 1000 }
+                fulfillment_type: { $ref: '#/components/schemas/FulfillmentType' }
+                delivery_address: { type: string, nullable: true, maxLength: 500 }
+      responses:
+        '200':
+          description: Updated order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderDetail' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /orders/{id}/transitions:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+    post:
+      tags: [Orders]
+      summary: Move an order to its next status
+      description: |
+        Allowed: Placed to Accepted or Cancelled; Accepted to Preparing or Cancelled; Preparing to
+        Ready or Cancelled; Ready to Completed. Completed and Cancelled are final. Cancelling needs a
+        `reason`. The order row is locked while the change is applied, so two simultaneous requests
+        cannot both succeed. Send `from` (the status your screen shows) to also detect stale views
+        (`STATE_CONFLICT`). Each change appends a row to the immutable status history.
+      security: [{ staffAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to]
+              properties:
+                to: { $ref: '#/components/schemas/OrderStatus' }
+                from: { $ref: '#/components/schemas/OrderStatus' }
+                reason: { type: string, maxLength: 255, description: Required when `to` is Cancelled }
+            examples:
+              accept: { value: { to: Accepted } }
+              cancel: { value: { to: Cancelled, reason: Out of stock } }
+      responses:
+        '200':
+          description: The updated order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderDetail' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`INVALID_TRANSITION`, `TERMINAL_STATE` or `STATE_CONFLICT`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error:
+                  code: INVALID_TRANSITION
+                  message: Cannot transition from Placed to Completed
+                  details: { current_status: Placed, requested_status: Completed }
+
+  /mobile/auth/login:
+    post:
+      tags: [Mobile]
+      summary: Customer sign-in
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+            example: { email: customer@example.com, password: password123 }
+      responses:
+        '200':
+          description: Signed in
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  token_type: { type: string, example: Bearer }
+                  customer: { $ref: '#/components/schemas/Customer' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/InvalidCredentials' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /mobile/foods:
+    get:
+      tags: [Mobile]
+      summary: Published foods (available and not archived)
+      security: [{ customerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { name: q, in: query, schema: { type: string } }
+        - { name: category, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: A page of foods
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Page' }
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: '#/components/schemas/Food' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /mobile/orders:
+    get:
+      tags: [Mobile]
+      summary: My orders, newest first
+      security: [{ customerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/OrderStatus' } }
+      responses:
+        '200':
+          description: A page of the caller's orders
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Page' }
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: '#/components/schemas/MobileOrder' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Mobile]
+      summary: Place an order
+      description: |
+        Prices are never accepted from the client. The server loads current prices, snapshots the food
+        name and unit price on every line, merges duplicate lines and calculates the totals. Foods that
+        are unavailable, archived or unknown reject the whole order with `FOOD_UNAVAILABLE`.
+      security: [{ customerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MobileOrderCreate' }
+            example:
+              items: [{ food_id: 1, quantity: 2 }]
+              fulfillment_type: delivery
+              delivery_address: Villa 12, Al Wasl Road, Jumeirah, Dubai
+              notes: Ring the bell twice
+      responses:
+        '201':
+          description: Order placed with status Placed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MobileOrder' }
+        '400':
+          description: '`VALIDATION_ERROR` or `FOOD_UNAVAILABLE`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /mobile/orders/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+    get:
+      tags: [Mobile]
+      summary: One of my orders
+      description: Another customer's order returns 404, exactly like a missing one.
+      security: [{ customerAuth: [] }]
+      responses:
+        '200':
+          description: The order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MobileOrder' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  securitySchemes:
+    staffAuth: { type: http, scheme: bearer, bearerFormat: JWT, description: Token from /auth/staff/login }
+    customerAuth: { type: http, scheme: bearer, bearerFormat: JWT, description: Token from /mobile/auth/login }
+  parameters:
+    Id: { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+    Page: { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+    PageSize: { name: page_size, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+  responses:
+    ValidationError:
+      description: Invalid input (`VALIDATION_ERROR`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: Validation failed
+              details: { fields: { price: [Must be greater than zero] } }
+    Unauthorized:
+      description: Missing, invalid, expired or revoked token (`INVALID_TOKEN`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    InvalidCredentials:
+      description: Wrong email or password (the same answer for unknown emails and deactivated accounts)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: INVALID_CREDENTIALS, message: Invalid email or password, details: {} } }
+    Forbidden:
+      description: The role is not allowed to do this (`INSUFFICIENT_ROLE`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Not found (`NOT_FOUND`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: The request conflicts with current state (for example `EMAIL_TAKEN`, `LAST_ADMIN`, `FOOD_ARCHIVED`, `ORDER_LOCKED`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    TooManyRequests:
+      description: Too many failed login attempts (`TOO_MANY_REQUESTS`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details]
+          properties:
+            code: { type: string, example: VALIDATION_ERROR }
+            message: { type: string }
+            details: { type: object, additionalProperties: true }
+    Page:
+      type: object
+      properties:
+        data: { type: array, items: {} }
+        pagination:
+          type: object
+          properties:
+            page: { type: integer }
+            page_size: { type: integer }
+            total: { type: integer }
+            total_pages: { type: integer }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string }
+    Role: { type: string, enum: [admin, operator] }
+    OrderStatus: { type: string, enum: [Placed, Accepted, Preparing, Ready, Completed, Cancelled] }
+    FulfillmentType: { type: string, enum: [pickup, delivery] }
+    Money: { type: string, pattern: '^\d+\.\d{2}$', example: '48.00' }
+    StaffUser:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        email: { type: string, format: email }
+        role: { $ref: '#/components/schemas/Role' }
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    StaffCreate:
+      type: object
+      required: [name, email, password, role]
+      properties:
+        name: { type: string, maxLength: 100 }
+        email: { type: string, format: email }
+        password: { type: string, minLength: 8, maxLength: 72 }
+        role: { $ref: '#/components/schemas/Role' }
+    StaffUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string, maxLength: 100 }
+        email: { type: string, format: email }
+        role: { $ref: '#/components/schemas/Role' }
+    Customer:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        email: { type: string, format: email }
+        phone: { type: string, nullable: true }
+    Food:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        category: { type: string }
+        price: { $ref: '#/components/schemas/Money' }
+        currency: { type: string, example: AED }
+        image_url: { type: string, nullable: true }
+        is_available: { type: boolean }
+        archived_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    FoodCreate:
+      type: object
+      required: [name, price]
+      properties:
+        name: { type: string, maxLength: 120 }
+        description: { type: string, nullable: true, maxLength: 1000 }
+        category: { type: string, maxLength: 60, default: Uncategorized }
+        price: { type: string, description: 'Greater than zero, at most 2 decimals. A number is also accepted.', example: '9.50' }
+        image_url: { type: string, format: uri, nullable: true, description: http(s) URL }
+        is_available: { type: boolean, default: true }
+    FoodUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string, maxLength: 120 }
+        description: { type: string, nullable: true, maxLength: 1000 }
+        category: { type: string, maxLength: 60 }
+        price: { type: string, example: '9.50' }
+        image_url: { type: string, format: uri, nullable: true }
+        is_available: { type: boolean }
+    OrderSummary:
+      type: object
+      properties:
+        id: { type: integer }
+        reference: { type: string, example: FO-000012 }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        fulfillment_type: { $ref: '#/components/schemas/FulfillmentType' }
+        total: { $ref: '#/components/schemas/Money' }
+        currency: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        customer:
+          type: object
+          nullable: true
+          properties:
+            id: { type: integer }
+            name: { type: string }
+            email: { type: string }
+    OrderItem:
+      type: object
+      description: A line with the food name and unit price captured when the order was placed.
+      properties:
+        id: { type: integer }
+        food_id: { type: integer }
+        food_name: { type: string }
+        unit_price: { $ref: '#/components/schemas/Money' }
+        quantity: { type: integer, minimum: 1 }
+        line_total: { $ref: '#/components/schemas/Money' }
+    OrderDetail:
+      allOf:
+        - { $ref: '#/components/schemas/OrderSummary' }
+        - type: object
+          properties:
+            subtotal: { $ref: '#/components/schemas/Money' }
+            delivery_address: { type: string, nullable: true }
+            notes: { type: string, nullable: true }
+            customer: { $ref: '#/components/schemas/Customer' }
+            items: { type: array, items: { $ref: '#/components/schemas/OrderItem' } }
+            status_history:
+              type: array
+              items:
+                type: object
+                properties:
+                  id: { type: integer }
+                  from_status: { allOf: [{ $ref: '#/components/schemas/OrderStatus' }], nullable: true }
+                  to_status: { $ref: '#/components/schemas/OrderStatus' }
+                  actor_type: { type: string, enum: [staff, customer, system] }
+                  actor_id: { type: integer, nullable: true }
+                  actor_name: { type: string, nullable: true }
+                  reason: { type: string, nullable: true }
+                  created_at: { type: string, format: date-time }
+    MobileOrderCreate:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: object
+            required: [food_id, quantity]
+            properties:
+              food_id: { type: integer }
+              quantity: { type: integer, minimum: 1, maximum: 99 }
+        fulfillment_type: { $ref: '#/components/schemas/FulfillmentType' }
+        delivery_address: { type: string, nullable: true, description: Required when fulfillment_type is delivery }
+        notes: { type: string, nullable: true, maxLength: 500 }
+    MobileOrder:
+      type: object
+      properties:
+        id: { type: integer }
+        reference: { type: string, example: FO-000012 }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        fulfillment_type: { $ref: '#/components/schemas/FulfillmentType' }
+        delivery_address: { type: string, nullable: true }
+        notes: { type: string, nullable: true }
+        subtotal: { $ref: '#/components/schemas/Money' }
+        total: { $ref: '#/components/schemas/Money' }
+        currency: { type: string }
+        created_at: { type: string, format: date-time }
+        items: { type: array, items: { $ref: '#/components/schemas/OrderItem' } }
+        status_history:
+          type: array
+          items:
+            type: object
+            properties:
+              from_status: { allOf: [{ $ref: '#/components/schemas/OrderStatus' }], nullable: true }
+              to_status: { $ref: '#/components/schemas/OrderStatus' }
+              reason: { type: string, nullable: true }
+              created_at: { type: string, format: date-time }
